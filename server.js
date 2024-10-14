@@ -1,0 +1,325 @@
+const express = require("express");
+const mysql = require("mysql2");
+const cors = require("cors");
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// MySQL Connection Setup
+const db = mysql.createConnection({
+  host: "localhost",
+  user: "root",
+  password: "",
+  database: "smartqueuedb",
+});
+
+db.connect((err) => {
+  if (err) {
+    console.error("Error connecting to database: " + err.stack);
+    return;
+  }
+  console.log("Connected to database");
+});
+
+app.get("/", (req, res) => {
+  res.json("hello world");
+});
+
+// Create a new user and save to the database
+app.post("/users/signup", (req, res) => {
+  const { uid, name, email, role } = req.body;
+
+  const insertUserQuery = `
+    INSERT INTO users (uid, name, email, role)
+    VALUES (?, ?, ?, ?)
+  `;
+
+  db.query(insertUserQuery, [uid, name, email, role], (err, results) => {
+    if (err) return res.status(500).send({ error: err.message });
+
+    res.status(201).send({
+      message: "User created and saved in database successfully!",
+      userId: results.insertId,
+    });
+  });
+});
+
+// Get specific user by ID
+app.get("/users/:userId", (req, res) => {
+  const { userId } = req.params;
+  const getUserQuery = `SELECT * FROM users WHERE id = ?`;
+
+  db.query(getUserQuery, [userId], (err, results) => {
+    if (err) return res.status(500).send({ error: err.message });
+
+    if (results.length === 0) {
+      return res.status(404).send({ message: "User not found" });
+    }
+
+    res.status(200).send(results[0]);
+  });
+});
+
+app.get("/user-role/:uid", (req, res) => {
+  const userId = req.params.uid;
+
+  const checkUserRoleQuery = `SELECT role FROM users WHERE uid = ?`;
+
+  db.query(checkUserRoleQuery, [userId], (err, results) => {
+    if (err) return res.status(500).send(err);
+
+    if (results.length === 0) {
+      return res.status(404).send("User not found.");
+    }
+
+    const userRole = results[0].role;
+    res.status(200).send({ role: userRole });
+  });
+});
+
+// Create Queue API
+app.post("/create-queue", (req, res) => {
+  const { creatorId, queueName, queueDescription, maxCapacity } = req.body;
+
+  // Check if all required fields are present
+  if (!creatorId || !queueName || !queueDescription || !maxCapacity) {
+    return res.status(400).send({ message: "All fields are required." });
+  }
+
+  // Check if the user has the "poster" role
+  const checkUserRoleQuery = `SELECT role FROM users WHERE uid = ?`;
+  db.query(checkUserRoleQuery, [creatorId], (err, roleResult) => {
+    if (err) return res.status(500).send(err);
+
+    // If user is not found or does not have the "poster" role
+    if (roleResult.length === 0 || roleResult[0].role !== "creator") {
+      return res
+        .status(403)
+        .send({ message: "Only 'poster' users can create queues." });
+    }
+
+    // Insert the new queue into the database
+    const createQueueQuery = `
+      INSERT INTO queues (creator_id, queue_name, queue_description, max_capacity)
+      VALUES (?, ?, ?, ?)`;
+
+    db.query(
+      createQueueQuery,
+      [creatorId, queueName, queueDescription, maxCapacity],
+      (err, result) => {
+        if (err) return res.status(500).send(err);
+
+        res.status(200).send({
+          message: "Queue created successfully!",
+          queueId: result.insertId,
+          queueName,
+          queueDescription,
+          maxCapacity,
+        });
+      }
+    );
+  });
+});
+
+/**
+ * 3. Join Queue: Only 'enlister' users can join a queue.
+ * Accepts: userId, queueId
+ */
+app.post("/join-queue", (req, res) => {
+  const { userId, queueId } = req.body;
+
+  if (!userId || !queueId) {
+    return res
+      .status(400)
+      .send({ message: "User ID and Queue ID are required." });
+  }
+
+  // Step 1: Check if the user has the role 'enlister'
+  const checkUserRoleQuery = `SELECT role FROM users WHERE uid = ?`;
+  db.query(checkUserRoleQuery, [userId], (err, results) => {
+    if (err) return res.status(500).send({ error: err });
+
+    if (results.length === 0) {
+      return res.status(404).send({ message: "User not found." });
+    }
+
+    const userRole = results[0].role;
+    if (userRole !== "enlister") {
+      return res
+        .status(403)
+        .send({ message: "Only 'enlister' users can join a queue." });
+    }
+
+    // Step 2: Check the maximum capacity of the queue
+    const checkQueueCapacityQuery = `SELECT COUNT(*) AS current_count, max_capacity FROM queues WHERE id = ?`;
+    db.query(checkQueueCapacityQuery, [queueId], (err, queueResults) => {
+      if (err) return res.status(500).send({ error: err });
+
+      const currentCount = queueResults[0].current_count;
+      const maxCapacity = queueResults[0].max_capacity;
+
+      if (currentCount >= maxCapacity) {
+        return res
+          .status(400)
+          .send({ message: "The queue has reached its maximum capacity." });
+      }
+
+      // Step 3: Calculate the next queue number for the user
+      const getMaxQueueNumberQuery = `SELECT IFNULL(MAX(queue_number), 0) + 1 AS next_queue_number FROM queue_status WHERE queue_id = ?`;
+
+      db.query(
+        getMaxQueueNumberQuery,
+        [queueId],
+        (err, maxQueueNumberResult) => {
+          if (err) return res.status(500).send({ error: err });
+
+          const nextQueueNumber = maxQueueNumberResult[0].next_queue_number;
+
+          // Step 4: Insert the user into the queue with the calculated queue number
+          const insertQueueQuery = `
+          INSERT INTO queue_status (user_id, queue_id, status, queue_number, join_time)
+          VALUES (?, ?, 'waiting', ?, NOW())`;
+
+          db.query(
+            insertQueueQuery,
+            [userId, queueId, nextQueueNumber],
+            (err, queueResult) => {
+              if (err) return res.status(500).send({ error: err });
+
+              res.status(200).send({
+                message: "Successfully joined the queue!",
+                queueId,
+                userId,
+                position: nextQueueNumber, // Return the assigned queue number
+              });
+            }
+          );
+        }
+      );
+    });
+  });
+});
+
+
+
+app.get("/queues/:userId", (req, res) => {
+  const { userId } = req.params;
+
+  // Query to select all queues created by the given user ID
+  const getQueuesByUserQuery = `
+    SELECT id, queue_name, queue_description, max_capacity, created_at 
+    FROM queues 
+    WHERE creator_id = ?`;
+
+  db.query(getQueuesByUserQuery, [userId], (err, results) => {
+    if (err) {
+      return res
+        .status(500)
+        .send({ error: "Failed to retrieve queues. Please try again." });
+    }
+
+    // If no queues are found, send an empty array
+    if (results.length === 0) {
+      return res.status(200).send({
+        message: "No queues found for the specified user.",
+        queues: [],
+      });
+    }
+
+    res.status(200).send({
+      message: "Successfully retrieved all queues created by the user.",
+      queues: results,
+    });
+  });
+});
+
+/**
+ * 4. Update Queue Status: Admin can update the queue status for a user.
+ * Accepts: userId, queueId, newStatus
+ */
+app.put("/update-queue-status", (req, res) => {
+  const { userId, queueId, newStatus } = req.body;
+  console.log(newStatus);
+  const updateStatusQuery = `UPDATE queue_status SET status = ? WHERE user_id = ? AND queue_id = ?`;
+  db.query(updateStatusQuery, [newStatus, userId, queueId], (err, result) => {
+    if (err) return res.status(500).send(err);
+
+    res.status(200).send({
+      message: "Queue status updated successfully!",
+      userId,
+      queueId,
+      newStatus,
+    });
+  });
+});
+
+/**
+ * 5. View Queue Status: User can view their position and status in the queue.
+ * Accepts: userId, queueId
+ */
+app.get("/queue-status/:userId/:queueId", (req, res) => {
+  const { userId, queueId } = req.params;
+
+  const getQueueStatusQuery = `
+  SELECT qs.queue_number, qs.status, q.queue_name
+  FROM queue_status qs
+  JOIN queues q ON qs.queue_id = q.id
+  WHERE qs.user_id = ? AND qs.queue_id = ?`;
+
+  db.query(getQueueStatusQuery, [userId, queueId], (err, results) => {
+    if (err) return res.status(500).send(err);
+
+    if (results.length === 0) {
+      return res.status(404).send("Queue status not found.");
+    }
+
+    res.status(200).send(results[0]);
+  });
+});
+
+/**
+ * 6. View All Customers in Queue: Admin can see the list of all customers currently waiting in a queue.
+ * Accepts: queueId
+ */
+// app.get("/all-customers/:queueId", (req, res) => {
+//   const { queueId } = req.params;
+
+//   const getAllCustomersQuery = `
+//     SELECT u.name, u.email, u.phone, qs.queue_number, qs.status
+//     FROM queue_status qs
+//     JOIN users u ON qs.user_id = u.id
+//     WHERE qs.queue_id = ? AND qs.status = 'waiting'
+//     ORDER BY qs.queue_number`;
+
+//   db.query(getAllCustomersQuery, [queueId], (err, results) => {
+//     if (err) return res.status(500).send(err);
+
+//     res.status(200).send(results);
+//   });
+// });
+
+app.get("/view-queue/:queueId", (req, res) => {
+  const { queueId } = req.params;
+
+  const viewQueueQuery = `
+    SELECT qs.queue_number, qs.user_id, qs.status, u.name 
+    FROM queue_status qs
+    INNER JOIN users u ON qs.user_id = u.uid
+    WHERE qs.queue_id = ?
+    ORDER BY qs.queue_number ASC`;
+
+  db.query(viewQueueQuery, [queueId], (err, results) => {
+    if (err) return res.status(500).send({ error: err });
+
+    res.status(200).send({
+      message: "Successfully fetched all customers in the queue.",
+      customers: results,
+    });
+  });
+});
+
+// Start Server
+app.listen(5000, () => {
+  console.log("Server running on port 5000");
+});
