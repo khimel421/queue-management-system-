@@ -129,6 +129,7 @@ app.post("/create-queue", (req, res) => {
 app.post("/join-queue", (req, res) => {
   const { userId, queueId } = req.body;
 
+  // Check if userId and queueId are provided
   if (!userId || !queueId) {
     return res
       .status(400)
@@ -151,56 +152,59 @@ app.post("/join-queue", (req, res) => {
         .send({ message: "Only 'enlister' users can join a queue." });
     }
 
-    // Step 2: Check the maximum capacity of the queue
-    const checkQueueCapacityQuery = `SELECT COUNT(*) AS current_count, max_capacity FROM queues WHERE id = ?`;
-    db.query(checkQueueCapacityQuery, [queueId], (err, queueResults) => {
+    // Step 2: Check if the user has already joined the queue
+    const checkExistingQueueQuery = `SELECT * FROM queue_status WHERE user_id = ? AND queue_id = ?`;
+    db.query(checkExistingQueueQuery, [userId, queueId], (err, existingResults) => {
       if (err) return res.status(500).send({ error: err });
 
-      const currentCount = queueResults[0].current_count;
-      const maxCapacity = queueResults[0].max_capacity;
-
-      if (currentCount >= maxCapacity) {
-        return res
-          .status(400)
-          .send({ message: "The queue has reached its maximum capacity." });
+      if (existingResults.length > 0) {
+        return res.status(400).send({
+          message: "You have already joined this queue.",
+        });
       }
 
-      // Step 3: Calculate the next queue number for the user
-      const getMaxQueueNumberQuery = `SELECT IFNULL(MAX(queue_number), 0) + 1 AS next_queue_number FROM queue_status WHERE queue_id = ?`;
+      // Step 3: Check the maximum capacity of the queue
+      const checkQueueCapacityQuery = `SELECT COUNT(*) AS current_count, max_capacity FROM queues WHERE id = ?`;
+      db.query(checkQueueCapacityQuery, [queueId], (err, queueResults) => {
+        if (err) return res.status(500).send({ error: err });
 
-      db.query(
-        getMaxQueueNumberQuery,
-        [queueId],
-        (err, maxQueueNumberResult) => {
+        const currentCount = queueResults[0].current_count;
+        const maxCapacity = queueResults[0].max_capacity;
+
+        if (currentCount >= maxCapacity) {
+          return res
+            .status(400)
+            .send({ message: "The queue has reached its maximum capacity." });
+        }
+
+        // Step 4: Calculate the next queue number for the user
+        const getMaxQueueNumberQuery = `SELECT IFNULL(MAX(queue_number), 0) + 1 AS next_queue_number FROM queue_status WHERE queue_id = ?`;
+
+        db.query(getMaxQueueNumberQuery, [queueId], (err, maxQueueNumberResult) => {
           if (err) return res.status(500).send({ error: err });
 
           const nextQueueNumber = maxQueueNumberResult[0].next_queue_number;
 
-          // Step 4: Insert the user into the queue with the calculated queue number
+          // Step 5: Insert the user into the queue with the calculated queue number
           const insertQueueQuery = `
-          INSERT INTO queue_status (user_id, queue_id, status, queue_number, join_time)
-          VALUES (?, ?, 'waiting', ?, NOW())`;
+            INSERT INTO queue_status (user_id, queue_id, status, queue_number, join_time)
+            VALUES (?, ?, 'waiting', ?, NOW())`;
 
-          db.query(
-            insertQueueQuery,
-            [userId, queueId, nextQueueNumber],
-            (err, queueResult) => {
-              if (err) return res.status(500).send({ error: err });
+          db.query(insertQueueQuery, [userId, queueId, nextQueueNumber], (err, queueResult) => {
+            if (err) return res.status(500).send({ error: err });
 
-              res.status(200).send({
-                message: "Successfully joined the queue!",
-                queueId,
-                userId,
-                position: nextQueueNumber, // Return the assigned queue number
-              });
-            }
-          );
-        }
-      );
+            res.status(200).send({
+              message: "Successfully joined the queue!",
+              queueId,
+              userId,
+              position: nextQueueNumber, // Return the assigned queue number
+            });
+          });
+        });
+      });
     });
   });
 });
-
 
 
 app.get("/queues/:userId", (req, res) => {
@@ -253,6 +257,43 @@ app.put("/update-queue-status", (req, res) => {
     });
   });
 });
+
+// user served in queue api
+
+app.post("/serve-user/:userId/:queueId", (req, res) => {
+  const { userId, queueId } = req.params;
+
+  // Step 1: Get the queue number of the user who is being served
+  const getQueueNumberQuery = `SELECT queue_number FROM queue_status WHERE user_id = ? AND queue_id = ?`;
+  db.query(getQueueNumberQuery, [userId, queueId], (err, result) => {
+    if (err) return res.status(500).send({ message: "Database error" });
+
+    if (result.length === 0) {
+      return res.status(404).send({ message: "User not found in queue" });
+    }
+
+    const servedQueueNumber = result[0].queue_number;
+
+    // Step 2: Mark the user as "served"
+    const markAsServedQuery = `UPDATE queue_status SET status = 'served' WHERE user_id = ? AND queue_id = ?`;
+    db.query(markAsServedQuery, [userId, queueId], (err) => {
+      if (err) return res.status(500).send({ message: "Failed to update user status" });
+
+      // Step 3: Shift the queue numbers of users behind the served user
+      const shiftQueueNumbersQuery = `
+        UPDATE queue_status 
+        SET queue_number = queue_number - 1 
+        WHERE queue_id = ? AND queue_number > ?`;
+
+      db.query(shiftQueueNumbersQuery, [queueId, servedQueueNumber], (err) => {
+        if (err) return res.status(500).send({ message: "Failed to shift queue numbers" });
+
+        res.status(200).send({ message: "User marked as served, queue numbers updated" });
+      });
+    });
+  });
+});
+
 
 /**
  * 5. View Queue Status: User can view their position and status in the queue.
@@ -318,6 +359,45 @@ app.get("/view-queue/:queueId", (req, res) => {
     });
   });
 });
+
+// In your server.js or routes file
+app.get("/api/queues/search", (req, res) => {
+  const { query } = req.query; // Assume a query parameter for searching
+  const searchQuery = `
+    SELECT * FROM queues
+    WHERE queue_name LIKE ? OR queue_description LIKE ?
+  `;
+
+  db.query(searchQuery, [`%${query}%`, `%${query}%`], (err, results) => {
+    if (err) return res.status(500).send(err);
+    res.status(200).json(results);
+  });
+});
+
+
+// Queue status for enlister
+app.get("/api/queue-status/:userId/:queueId", (req, res) => {
+  const { userId, queueId } = req.params;
+
+  const queueStatusQuery = `
+    SELECT qs.queue_number, 
+           (SELECT COUNT(*) FROM queue_status WHERE queue_id = ?) AS total_people
+    FROM queue_status qs
+    WHERE qs.user_id = ? AND qs.queue_id = ?
+  `;
+
+  db.query(queueStatusQuery, [queueId, userId, queueId], (err, results) => {
+    if (err) return res.status(500).send(err);
+    
+    if (results.length === 0) {
+      return res.status(404).send("Queue status not found.");
+    }
+
+    res.status(200).json(results[0]); // Return the first result
+  });
+});
+
+
 
 // Start Server
 app.listen(5000, () => {
