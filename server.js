@@ -258,6 +258,24 @@ app.put("/update-queue-status", (req, res) => {
   });
 });
 
+app.get("/all-queue-users/:queueId", (req, res) => {
+  const { queueId } = req.params;
+
+  const getAllQueueUsersQuery = `
+    SELECT u.name, qs.queue_number, qs.status, qs.user_id
+    FROM queue_status qs
+    JOIN users u ON qs.user_id = u.uid
+    WHERE qs.queue_id = ?
+    ORDER BY qs.queue_number ASC`;
+
+  db.query(getAllQueueUsersQuery, [queueId], (err, result) => {
+    if (err) return res.status(500).send({ message: "Database error" });
+
+    res.status(200).send(result);
+  });
+});
+
+
 // user served in queue api
 
 app.post("/serve-user/:userId/:queueId", (req, res) => {
@@ -319,6 +337,58 @@ app.get("/queue-status/:userId/:queueId", (req, res) => {
   });
 });
 
+
+
+app.get("/joined-queues/:userId", (req, res) => {
+  const { userId } = req.params;
+
+  // SQL query to get all queues the user has joined
+  const getUserJoinedQueuesQuery = `
+    SELECT qs.queue_id, qs.queue_number, qs.status, q.queue_name, q.queue_description
+    FROM queue_status qs
+    JOIN queues q ON qs.queue_id = q.id
+    WHERE qs.user_id = ?`;
+
+  db.query(getUserJoinedQueuesQuery, [userId], (err, results) => {
+    if (err) {
+      return res.status(500).send({ error: err });
+    }
+
+    if (results.length === 0) {
+      return res.status(404).send({ message: "No queues found for this user." });
+    }
+
+    res.status(200).send({
+      message: "Queues the user has joined:",
+      joinedQueues: results
+    });
+  });
+});
+
+
+app.get('/api/queues', (req, res) => {
+  // Query to select all queues from the 'queues' table
+  const getAllQueuesQuery = `
+    SELECT id, queue_name, queue_description, max_capacity 
+    FROM queues
+  `;
+
+  db.query(getAllQueuesQuery, (err, results) => {
+    if (err) {
+      return res.status(500).json({ message: 'Database error', error: err });
+    }
+
+    if (results.length === 0) {
+      return res.status(404).json({ message: 'No queues found' });
+    }
+
+    // Return the list of queues
+    res.status(200).json(results);
+  });
+});
+
+
+
 /**
  * 6. View All Customers in Queue: Admin can see the list of all customers currently waiting in a queue.
  * Accepts: queueId
@@ -373,6 +443,33 @@ app.get("/api/queues/search", (req, res) => {
     res.status(200).json(results);
   });
 });
+
+// Endpoint to get user details by userId
+app.get('/api/users/:userId', (req, res) => {
+  const { userId } = req.params;
+
+  // SQL query to fetch user details (including name) by user ID
+  const getUserDetailsQuery = 'SELECT uid, name, email, role FROM users WHERE uid = ?';
+
+  db.query(getUserDetailsQuery, [userId], (err, results) => {
+    if (err) {
+      return res.status(500).send({ message: 'Database error', error: err });
+    }
+
+    if (results.length === 0) {
+      return res.status(404).send({ message: 'User not found' });
+    }
+
+    // Send user details as response
+    res.status(200).send({
+      uid: results[0].uid,
+      name: results[0].name,
+      email: results[0].email,
+      role: results[0].role
+    });
+  });
+});
+
 
 
 // Queue status for enlister
