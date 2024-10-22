@@ -3,7 +3,10 @@ const mysql = require("mysql2");
 const cors = require("cors");
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin:['http://localhost:5173']
+}));
+
 app.use(express.json());
 
 // MySQL Connection Setup
@@ -60,6 +63,8 @@ app.get("/users/:userId", (req, res) => {
     res.status(200).send(results[0]);
   });
 });
+
+
 
 app.get("/user-role/:uid", (req, res) => {
   const userId = req.params.uid;
@@ -493,6 +498,40 @@ app.get("/api/queue-status/:userId/:queueId", (req, res) => {
     res.status(200).json(results[0]); // Return the first result
   });
 });
+
+
+
+// DELETE API to delete a queue by ID
+app.delete("/delete-queue/:queueId", (req, res) => {
+  const { queueId } = req.params;
+
+  // First, delete related rows in queue_status table
+  const deleteQueueStatusQuery = `DELETE FROM queue_status WHERE queue_id = ?`;
+
+  db.query(deleteQueueStatusQuery, [queueId], (err, result) => {
+    if (err) {
+      console.error("Error deleting related queue statuses:", err);
+      return res.status(500).send({ message: "Error deleting related queue statuses." });
+    }
+
+    // Then, delete the queue itself
+    const deleteQueueQuery = `DELETE FROM queues WHERE id = ?`;
+
+    db.query(deleteQueueQuery, [queueId], (err, result) => {
+      if (err) {
+        console.error("Error deleting queue:", err);
+        return res.status(500).send({ message: "Error deleting the queue." });
+      }
+
+      if (result.affectedRows === 0) {
+        return res.status(404).send({ message: "Queue not found." });
+      }
+
+      res.status(200).send({ message: "Queue and related statuses successfully deleted." });
+    });
+  });
+});
+
 
 
 
